@@ -22,7 +22,7 @@ class Client:
         self.client_port = 9999
         self.MSS = 10
         self.send_base = self.next_seq_num
-        self.winSize = 4
+        self.winSize = 5
         self.file_length = 0
 
     def __del__(self):
