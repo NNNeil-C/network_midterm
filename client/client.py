@@ -79,19 +79,17 @@ class Client:
         SYN = 0
         ACK = 0
         Func = 0
-        print("begin to split file into MSS")
         data_buffer = []
-        data_ack = []
-        buffer_beging = 0
-        buffer_beging += len(data_buffer) * self.MSS
+        buffer_begin = 0
+        buffer_begin += len(data_buffer) * self.MSS
         data_buffer, data_ack = self.get_buffer(file, self.winSize)
         can_send = True
         while True:
             try:
                 if can_send:
-                    while self.next_seq_num < buffer_beging + min(self.winSize, len(data_buffer)) * self.MSS:
+                    while self.next_seq_num < buffer_begin + min(self.winSize, len(data_buffer)) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
-                                                   data_buffer[(self.next_seq_num - buffer_beging) // self.MSS])
+                                                   data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
                     can_send = False
                 else:
@@ -104,7 +102,7 @@ class Client:
                             if self.send_base < self.next_seq_num:
                                 self.file_socket.settimeout(2)
                             else:
-                                buffer_beging += len(data_buffer) * self.MSS
+                                buffer_begin += len(data_buffer) * self.MSS
                                 data_buffer, data_ack = self.get_buffer(file, self.winSize)
                                 can_send = True
                             if mydata['ack'] >= self.file_length:
@@ -112,13 +110,15 @@ class Client:
                                 break
             except socket.timeout as reason:
                 print(reason)
-                if self.send_base // self.MSS == self.file_length-1:
+                if self.send_base >= self.file_length:
                     print(self.send_base, self.file_length)
-                    time.sleep(10)
                     break
                 elif self.send_base < self.next_seq_num:
+                    temp = self.next_seq_num
+                    self.next_seq_num = self.send_base
                     self.reliable_send_segment(SYN, ACK, Func,
-                                               data_buffer[(self.send_base - buffer_beging) // self.MSS])
+                                               data_buffer[(self.send_base - buffer_begin) // self.MSS])
+                    self.next_seq_num = temp
 
     def get_last_ack(self, data):
         for i in range(len(data)):
@@ -156,9 +156,13 @@ class Client:
                     can_send = False
                 else:
                     mydata, addr = self.receive_segment()
+                    can_send = True
                     if mydata['valid']:
                         if mydata['FUNC'] == 0:
                             data = b''
+                            if mydata['seq'] < buffer_begin or mydata['seq'] > buffer_begin + len(
+                                    data_buffer) * self.MSS:
+                                continue
                             if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
                                 data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
                                 self.winSize = self.get_free_buff(data_buffer)
@@ -171,8 +175,12 @@ class Client:
                                         data_buffer = [b''] * self.winSize
                                         buffer_begin = self.client_ACK
                                     else:
+                                        if buffer_begin + next_ack * self.MSS - rtACK <= self.MSS:
+                                            socket.timeout(1)
+                                            can_send = False
                                         self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
-                        can_send = True
+                                        if self.client_ACK >= self.file_length:
+                                            can_send = True
             except socket.timeout as reason:
                 print(reason)
                 can_send = True
