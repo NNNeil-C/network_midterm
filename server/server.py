@@ -1,19 +1,20 @@
 import socket
 import random
 import logging
+import os
 import threading
 
 
 class Interface:
     def __init__(self, address, seq, func):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.file_socket.bind(("127.0.0.1", 7777))
+        self.client_port = random.randint(5600, 10000)
+        self.file_socket.bind(("127.0.0.1", self.client_port))
         self.client_ACK = seq + 1
         (self.server_name, self.server_port) = address
-        self.client_port = 7777
-        self.MSS = 2
+        self.MSS = 10
         self.send_base = self.next_seq_num = random.randint(0, 100)
-        self.winSize = 10 * self.MSS
+        self.winSize = 5
         self.file_length = 0
         self.lockForBase = threading.Lock()
         if self.hand_shake(func):
@@ -47,7 +48,7 @@ class Interface:
         return port+address+seq_number+ack_number+checksum+flag+windows_size+data
 
     def reliable_send_segment(self, SYN, ACK, Func, _data=b''):
-        delay_time = 10
+        delay_time = 2
         self.send_segment(SYN, ACK, Func, _data)
         self.file_socket.settimeout(delay_time)
 
@@ -62,47 +63,99 @@ class Interface:
         return data, address
 
     def send_file(self, file):
-        self.next_seq_num = self.send_base = 0;
+        self.next_seq_num = self.send_base = 0
+        self.file_length = os.path.getsize(self.file_name)
         SYN = 0
         ACK = 0
         Func = 1
         data = []
-        data_size = 0
-        print("begin to split file into MSS")
         while True:
-            temp = file.read(self.MSS)
-            data_size += len(temp)
-            if temp == b'':
-                break
-            data.append(temp)
-        print("finish")
+            try:
+                self.reliable_send_segment(SYN, ACK, Func, b'%d' % self.file_length)
+                mydata, addr = self.receive_segment()
+                if len(mydata['data']) != 0:
+                    break
+            except socket.timeout as reason:
+                print(reason)
+        Func = 0
 
+        data_buffer = []
+        data_ack = []
+        buffer_beging = 0
+        buffer_beging += len(data_buffer) * self.MSS
+        data_buffer, data_ack = self.get_buffer(file, self.winSize)
         can_send = True
         while True:
             try:
                 if can_send:
-                    self.reliable_send_segment(SYN, ACK, Func, data[self.next_seq_num])
-                    self.next_seq_num = self.next_seq_num + 1
-                    self.file_socket.settimeout(2)
+                    while self.next_seq_num < buffer_beging + min(self.winSize, len(data_buffer)) * self.MSS:
+                        self.reliable_send_segment(SYN, ACK, Func,
+                                                   data_buffer[(self.next_seq_num - buffer_beging) // self.MSS])
+                        self.next_seq_num = self.next_seq_num + self.MSS
                     can_send = False
                 else:
-                    mydata = self.receive_segment
+                    mydata, addr = self.receive_segment()
+                    self.winSize = mydata['winsize']
+                    print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
                             self.send_base = mydata['ack']
-                            can_send = True
+                            if self.send_base < self.next_seq_num:
+                                self.file_socket.settimeout(2)
+                            else:
+                                buffer_beging += len(data_buffer) * self.MSS
+                                data_buffer, data_ack = self.get_buffer(file, self.winSize)
+                                can_send = True
+                            if mydata['ack'] >= self.file_length:
+                                print('file transmission over')
+                                break
             except socket.timeout as reason:
                 print(reason)
-                can_send = True
-                if self.send_base == self.file_length:
+                if self.send_base // self.MSS == self.file_length - 1:
+                    print(self.send_base, self.file_length)
                     break
+                elif self.send_base < self.next_seq_num:
+                    self.reliable_send_segment(SYN, ACK, Func,
+                                               data_buffer[(self.send_base - buffer_beging) // self.MSS])
+
+    def get_buffer(self, file, size):
+        buf = []
+        ack = []
+        for i in range(size):
+            temp = file.read(self.MSS)
+            if temp == b'':
+                break
+            buf.append(temp)
+            ack.append(False)
+        return buf, ack
+
+    def get_last_ack(self, data):
+        for i in range(len(data)):
+            if data[i] == b'':
+                return i
+        return -1
+
+    def get_free_buff(self, data):
+        count = 0
+        for i in range(len(data)):
+            if data[i] == b'':
+                count += 1
+        return count
+
+    def write_buffer_to_file(self, file, data):
+        print(data)
+        for temp in data:
+            file.write(temp)
 
     def receive_file(self, file):
         SYN = 0
         ACK = 0
         Func = 0
-        print('begin to receive file')
-        self.send_base = self.next_seq_num = self.client_ACK = 0
+        data_buffer = [b'']*self.winSize
+
+        buffer_begin = 0
+        print('begin to receive file:', self.file_length)
+        self.send_base = self.next_seq_num = self.client_ACK = rtACK = 0
         can_send = True
         while True:
             try:
@@ -111,17 +164,27 @@ class Interface:
                     can_send = False
                 else:
                     mydata, addr = self.receive_segment()
-                    print(mydata['valid'])
                     if mydata['valid']:
-                        print('seq', mydata['seq'])
-                        if mydata['seq'] + 1 > self.client_ACK:
-                            file.write(mydata['data'])
-                            self.client_ACK = mydata['seq'] + 1
-                        can_send = True
+                        if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
+                            data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
+                            self.winSize = self.get_free_buff(data_buffer)
+                            if rtACK >= mydata['seq'] and rtACK < mydata['seq'] + len(mydata['data']):
+                                next_ack = self.get_last_ack(data_buffer)
+                                if next_ack == -1:
+                                    self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
+                                    self.write_buffer_to_file(file, data_buffer)
+                                    self.winSize = 5
+                                    data_buffer = [b'']*self.winSize
+                                    buffer_begin = self.client_ACK
+                                else:
+                                    self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
+                    can_send = True
             except socket.timeout as reason:
                 print(reason)
                 can_send = True
-                if self.client_ACK == self.file_length:
+                if self.client_ACK >= self.file_length:
+                    self.write_buffer_to_file(file, data_buffer)
+                    print("RECEIVE FILE OVER")
                     break
 
     def hand_shake(self, func):
@@ -129,17 +192,19 @@ class Interface:
         ACK = 1
         while True:
             try:
+                print("START HANDSHAKE")
                 self.reliable_send_segment(SYN, ACK, func)
                 data, addr = self.receive_segment()
                 print('hand shake:', data)
                 if data['valid']:
                     if data['ACK'] == 1:
                         f = data['data'].split(b" ")
-                        self.file_name = './data'+  f[0].decode('utf-8')
+                        self.file_name = './data' + f[0].decode('utf-8')
                         self.file_length = int(f[1])
                         break
             except socket.timeout as reason:
                 print(reason)
+        print("HANDSHAKE SUCCESS")
         return True
 
 
@@ -210,9 +275,21 @@ def decode_segment(segment):
             'winsize': int.from_bytes(windows_size, 'little'), 'checksum': checksum, 'data': data}
 
 
+def handler(addr, seq, func):
+    Interface(addr, seq, func)
+
+
 if __name__ == "__main__":
     server = Server()
+    addr = ()
+    seq = 0
+    func = 0
+
     while True:
         data, addr = server.receive_segment()
         if data['SYN'] == 1:
-            i = Interface(addr, data['seq'], data['FUNC'])
+            seq = data['seq']
+            func = data['FUNC']
+            t = threading.Thread(target=handler, args=(addr, seq, func))
+            t.start()
+            # i = Interface(addr, data['seq'], data['FUNC'])
