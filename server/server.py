@@ -4,8 +4,7 @@ import time
 import logging
 import os
 import threading
-import utils
-
+import numpy
 
 class Interface:
     def __init__(self, address, seq, func):
@@ -16,8 +15,9 @@ class Interface:
         (self.server_name, self.server_port) = address
         self.MSS = 10
         self.send_base = self.next_seq_num = random.randint(0, 100)
-        self.initWinSize = 10
-        self.winSize = self.initWinSize
+        self.winSize = 50
+        self.congestion_winSize = 50
+        self.threshold = 30
         self.file_length = 0
         self.lockForBase = threading.Lock()
         if self.hand_shake(func):
@@ -90,7 +90,8 @@ class Interface:
         while True:
             try:
                 if can_send:
-                    while self.next_seq_num < buffer_begin + min(self.winSize, len(data_buffer)) * self.MSS:
+                    # and min congestion window
+                    while self.next_seq_num < buffer_begin + min(min(self.winSize, len(data_buffer)), self.congestion_winSize) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
                                                    data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
@@ -100,6 +101,11 @@ class Interface:
                     self.winSize = mydata['winsize']
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
+                            #拥塞控制
+                            if (self.congestion_winSize < self.threshold):
+                                self.congestion_winSize = self.congestion_winSize * 2
+                            else:
+                                self.congestion_winSize = self.congestion_winSize + 1
                             self.send_base = mydata['ack']
                             if self.send_base < self.next_seq_num:
                                 self.file_socket.settimeout(2)
@@ -110,7 +116,11 @@ class Interface:
                             if mydata['ack'] >= self.file_length:
                                 print('file transmission over')
                                 break
+                
             except socket.timeout as reason:
+                #拥塞控制
+                self.threshold = ceil(self.threshold / 2)
+                self.congestion_winSize = 1
                 print(reason)
                 if self.send_base >= self.file_length:
                     print(self.send_base, self.file_length)
@@ -185,6 +195,7 @@ class Interface:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
                                     self.winSize = self.initWinSize
+                                    self.winSize = 50
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
                                 else:
@@ -195,7 +206,10 @@ class Interface:
                                     if self.client_ACK >= self.file_length:
                                         can_send = True
                                     print(self.client_ACK, self.file_length)
+                #加入拥塞控制
+                self.congestion_winSize = self.congestion_winSize * 2
             except socket.timeout as reason:
+                self.congestion_winSize = 5
                 print(reason)
                 can_send = True
                 if self.client_ACK >= self.file_length:
@@ -229,6 +243,7 @@ class Server:
     def __init__(self):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_socket.bind(('127.0.0.1', 5555))
+        addr_info = {}
 
     def receive_segment(self):
         seg, address = self.file_socket.recvfrom(4096)
@@ -239,6 +254,7 @@ class Server:
             print(error)
             data['valid'] = False
         return data, address
+
 
 
 def get_checksum(data):
@@ -282,10 +298,11 @@ def decode_segment(segment):
 
 def handler(addr, seq, func):
     Interface(addr, seq, func)
-    del addrInfo[addr]
+    # del addr in addr_info
+    addr_info.remove(addr)
 
 
-addrInfo = {}
+addr_info = []
 
 if __name__ == "__main__":
     server = Server()
@@ -294,8 +311,9 @@ if __name__ == "__main__":
     func = 0
     while True:
         data, addr = server.receive_segment()
-        if data['SYN'] == 1 and addr not in addrInfo:
-            addrInfo[addr] = 1
+        if (data['SYN'] == 1 and addr not in addr_info):
+            # addr -> addr_info
+            addr_info.append(addr)
             seq = data['seq']
             func = data['FUNC']
             t = threading.Thread(target=handler, args=(addr, seq, func))
