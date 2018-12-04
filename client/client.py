@@ -8,6 +8,7 @@ import random
 import math
 import struct
 import time
+import numpy
 
 
 class Client:
@@ -22,8 +23,10 @@ class Client:
         self.client_port = 9999
         self.MSS = 10
         self.send_base = self.next_seq_num
-        self.winSize = 5
+        self.winSize = 50
+        self.congestion_winSize = 50
         self.file_length = 0
+        self.threshold = 30
 
     def __del__(self):
         self.file_socket.close()
@@ -32,7 +35,18 @@ class Client:
         # * is the character used to split
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
-        print("发送:", data)
+        # print("发送:", data)
+        
+        #进度条
+        global func
+        global start
+        if (start == True and func == 'lget'):
+            #print(self.file_length)
+            sys.stdout.write('\r')
+            done = (data['ack'] * 100 // self.file_length)
+            done = min(100, done)
+            sys.stdout.write("[%s>%s] %s" % ('-'*done, ' '*(100 - done),str(done)+'%'))
+            sys.stdout.flush()
         address = (self.server_name, self.server_port)
         self.file_socket.sendto(seg, address)
 
@@ -57,6 +71,17 @@ class Client:
         try:
             data = decode_segment(seg)
             data['valid'] = is_correct(seg)
+            #进度条
+            global func
+            global start
+            if (start == True and func == 'lsend'):
+                #print(self.file_length)
+                sys.stdout.write('\r')
+                done = (data['ack'] * 100 // self.file_length)
+                done = min(done, 100)
+                sys.stdout.write("[%s>%s] %s" % ('-'*done, ' '*(100 - done),str(done)+'%'))
+                sys.stdout.flush()
+
         except TypeError as error:
             print(error)
             data['valid'] = False
@@ -87,7 +112,8 @@ class Client:
         while True:
             try:
                 if can_send:
-                    while self.next_seq_num < buffer_begin + min(self.winSize, len(data_buffer)) * self.MSS:
+                    # and min congestion window
+                    while self.next_seq_num < buffer_begin + min(min(self.winSize, len(data_buffer)), self.congestion_winSize) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
                                                    data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
@@ -95,9 +121,14 @@ class Client:
                 else:
                     mydata, addr = self.receive_segment()
                     self.winSize = mydata['winsize']
-                    print("接收:", mydata)
+                    #print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
+                            #拥塞控制
+                            if (self.congestion_winSize < self.threshold):
+                                self.congestion_winSize = self.congestion_winSize * 2
+                            else:
+                                self.congestion_winSize = self.congestion_winSize + 1
                             self.send_base = mydata['ack']
                             if self.send_base < self.next_seq_num:
                                 self.file_socket.settimeout(2)
@@ -109,6 +140,9 @@ class Client:
                                 print('file transmission over')
                                 break
             except socket.timeout as reason:
+                #拥塞控制
+                self.threshold = self.threshold + 0.5 // 2
+                self.congestion_winSize = 1
                 print(reason)
                 if self.send_base >= self.file_length:
                     print(self.send_base, self.file_length)
@@ -134,7 +168,7 @@ class Client:
         return count
 
     def write_buffer_to_file(self, file, data):
-        print(data)
+        # print(data)
         for temp in data:
             file.write(temp)
 
@@ -156,6 +190,7 @@ class Client:
                     can_send = False
                 else:
                     mydata, addr = self.receive_segment()
+                    
                     can_send = True
                     if mydata['valid']:
                         if mydata['FUNC'] == 0:
@@ -171,7 +206,7 @@ class Client:
                                     if next_ack == -1:
                                         self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                         self.write_buffer_to_file(file, data_buffer)
-                                        self.winSize = 5
+                                        self.winSize = 50
                                         data_buffer = [b''] * self.winSize
                                         buffer_begin = self.client_ACK
                                     else:
@@ -181,8 +216,11 @@ class Client:
                                         self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
                                         if self.client_ACK >= self.file_length:
                                             can_send = True
+                #加入拥塞控制
+                #self.congestion_winSize = self.congestion_winSize * 2
             except socket.timeout as reason:
-                print(reason)
+                self.congestion_winSize = 5
+                # print(reason)
                 can_send = True
                 if self.client_ACK >= self.file_length:
                     self.write_buffer_to_file(file, data_buffer)
@@ -259,20 +297,28 @@ def decode_segment(segment):
 
 if __name__ == "__main__":
     default_port = 5555
-    server_name = "127.0.0.1"
-    file_name = "././test.txt"
+    command = input('Enter your command: ')
+    command_list = command.split()
+    func = command_list[1]
+    server_name = command_list[2]
+    file_name = command_list[3]
     client = Client(file_name, server_name, default_port)
-    func = "lget"
+    start = False
     if func == "lsend":
         with open(file_name, "rb") as file:
             # TCP construction
+            print('正在尝试拜访服务器...')
             if client.hand_shake(0):
-                print("TCP construct successfully")
+                start = True
+                print("TCP(using UDP) construct successfully")
+                print('正在向 {server} 上传数据({filepath})...'.format(server = server_name, filepath = file_name))
                 client.send_file(file)
     elif func == "lget":
         with open(file_name, "wb") as file:
             # TCP construction
+            print('正在尝试拜访服务器...')
             if client.hand_shake(1):
-                print("TCP construct successfully")
+                start = True
+                print("TCP（using UDP） construct successfully")
+                print('正在从 {server} 下载数据({filepath})...'.format(server = server_name, filepath = file_name))
                 client.receive_file(file)
-
