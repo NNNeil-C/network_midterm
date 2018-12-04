@@ -46,8 +46,7 @@ class Client:
             sys.stdout.write("[%s>%s] %s" % ('-'*done, ' '*(100 - done),str(done)+'%'))
             sys.stdout.flush()
         address = (self.server_name, self.server_port)
-        if random.randint(0, 10) > 2:
-            self.file_socket.sendto(seg, address)
+        self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -84,7 +83,7 @@ class Client:
         except TypeError as error:
             print(error)
             data['valid'] = False
-        print("接收:", data)
+        # print("接收:", data)
         return data, address
 
     def get_buffer(self, file, size):
