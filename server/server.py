@@ -36,8 +36,8 @@ class Interface:
         data = decode_segment(seg)
         print("发送:", data)
         address = (self.server_name, self.server_port)
-        if random.randint(0, 10) > 2:
-            self.file_socket.sendto(seg, address)
+        # if random.randint(0, 10) > 2:
+        self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -194,7 +194,6 @@ class Interface:
                                 if next_ack == -1:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
-                                    self.winSize = self.initWinSize
                                     self.winSize = 50
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
