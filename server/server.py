@@ -36,8 +36,8 @@ class Interface:
         data = decode_segment(seg)
         print("发送:", data)
         address = (self.server_name, self.server_port)
-        # if random.randint(0, 10) > 2:
-        self.file_socket.sendto(seg, address)
+        if random.randint(0, 10) > 2:
+            self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -123,7 +123,7 @@ class Interface:
                 self.congestion_winSize = 1
                 print(reason)
                 if self.send_base >= self.file_length:
-                    # print(self.send_base, self.file_length)
+                    print(self.send_base, self.file_length)
                     break
                 elif self.send_base < self.next_seq_num:
                     temp = self.next_seq_num
@@ -180,20 +180,21 @@ class Interface:
                     mydata, addr = self.receive_segment()
                     can_send = True
                     if mydata['valid'] and not mydata['ACK'] == 1:
-                        # print(mydata['seq'], buffer_begin, len(data_buffer))
+                        print(mydata['seq'], buffer_begin, len(data_buffer))
                         if mydata['seq'] < buffer_begin or mydata['seq'] > buffer_begin + len(data_buffer) * self.MSS:
-                            # print("continue")
+                            print("continue")
                             continue
                         if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
                             data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
                             self.winSize = self.get_free_buff(data_buffer)
-                            # print(rtACK, mydata['seq'], mydata['seq'] + len(mydata['data']))
+                            print(rtACK, mydata['seq'], mydata['seq'] + len(mydata['data']))
                             if rtACK >= mydata['seq'] and rtACK < mydata['seq'] + len(mydata['data']):
                                 next_ack = self.get_last_ack(data_buffer)
-                                # print('next ack', next_ack)
+                                print('next ack', next_ack)
                                 if next_ack == -1:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
+                                    self.winSize = self.initWinSize
                                     self.winSize = 50
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
@@ -204,7 +205,7 @@ class Interface:
                                     self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
                                     if self.client_ACK >= self.file_length:
                                         can_send = True
-                                    # print(self.client_ACK, self.file_length)
+                                    print(self.client_ACK, self.file_length)
                 #加入拥塞控制
                 self.congestion_winSize = self.congestion_winSize * 2
             except socket.timeout as reason:
@@ -242,7 +243,6 @@ class Server:
     def __init__(self):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_socket.bind(('127.0.0.1', 5555))
-        print("============ Wating connect =============")
         addr_info = {}
 
     def receive_segment(self):
@@ -311,7 +311,6 @@ if __name__ == "__main__":
     func = 0
     while True:
         data, addr = server.receive_segment()
-        print(addr)
         if (data['SYN'] == 1 and addr not in addr_info):
             # addr -> addr_info
             addr_info.append(addr)
