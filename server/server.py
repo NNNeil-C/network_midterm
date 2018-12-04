@@ -32,7 +32,6 @@ class Interface:
         self.file_socket.close()
 
     def send_segment(self, SYN, ACK, Func, data=b""):
-        # * is the character used to split
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
         print("发送:", data)
@@ -100,7 +99,6 @@ class Interface:
                 else:
                     mydata, addr = self.receive_segment()
                     self.winSize = mydata['winsize']
-                    print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
                             #拥塞控制
@@ -181,18 +179,23 @@ class Interface:
                 else:
                     mydata, addr = self.receive_segment()
                     can_send = True
-                    if mydata['valid']:
+                    if mydata['valid'] and not mydata['ACK'] == 1:
+                        print(mydata['seq'], buffer_begin, len(data_buffer))
                         if mydata['seq'] < buffer_begin or mydata['seq'] > buffer_begin + len(data_buffer) * self.MSS:
+                            print("continue")
                             continue
                         if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
                             data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
                             self.winSize = self.get_free_buff(data_buffer)
+                            print(rtACK, mydata['seq'], mydata['seq'] + len(mydata['data']))
                             if rtACK >= mydata['seq'] and rtACK < mydata['seq'] + len(mydata['data']):
                                 next_ack = self.get_last_ack(data_buffer)
+                                print('next ack', next_ack)
                                 if next_ack == -1:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
-                                    self.winSize = 5
+                                    self.winSize = self.initWinSize
+                                    self.winSize = 50
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
                                 else:
@@ -202,6 +205,7 @@ class Interface:
                                     self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
                                     if self.client_ACK >= self.file_length:
                                         can_send = True
+                                    print(self.client_ACK, self.file_length)
                 #加入拥塞控制
                 self.congestion_winSize = self.congestion_winSize * 2
             except socket.timeout as reason:
@@ -212,6 +216,7 @@ class Interface:
                     self.write_buffer_to_file(file, data_buffer)
                     print("RECEIVE FILE OVER")
                     break
+
 
     def hand_shake(self, func):
         SYN = 1
@@ -304,7 +309,6 @@ if __name__ == "__main__":
     addr = ()
     seq = 0
     func = 0
-
     while True:
         data, addr = server.receive_segment()
         if (data['SYN'] == 1 and addr not in addr_info):
@@ -314,3 +318,4 @@ if __name__ == "__main__":
             func = data['FUNC']
             t = threading.Thread(target=handler, args=(addr, seq, func))
             t.start()
+

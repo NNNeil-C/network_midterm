@@ -13,13 +13,13 @@ import time
 class Client:
     def __init__(self, _file_name, _server_name, port):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.file_socket.bind(("127.0.0.1", 9999))
+        self.client_port = random.randint(10000, 12000)
+        self.file_socket.bind(("127.0.0.1", self.client_port))
         self.next_seq_num = random.randint(0, 100)
         self.client_ACK = 0
         self.file_name = _file_name
         self.server_name = _server_name
         self.server_port = port
-        self.client_port = 9999
         self.MSS = 10
         self.send_base = self.next_seq_num
         self.winSize = 5
@@ -31,7 +31,6 @@ class Client:
         self.file_socket.close()
 
     def send_segment(self, SYN, ACK, Func, data=b""):
-        # * is the character used to split
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
         # print("发送:", data)
@@ -85,6 +84,7 @@ class Client:
         except TypeError as error:
             print(error)
             data['valid'] = False
+        print("接收:", data)
         return data, address
 
     def get_buffer(self, file, size):
@@ -108,16 +108,19 @@ class Client:
         buffer_begin = 0
         buffer_begin += len(data_buffer) * self.MSS
         data_buffer, data_ack = self.get_buffer(file, self.winSize)
+        duplication = 0
         can_send = True
         while True:
             try:
                 if can_send:
+
                     # and min congestion window
                     while self.next_seq_num < buffer_begin + min(min(self.winSize, len(data_buffer)), self.congestion_winSize) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
                                                    data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
                     can_send = False
+                    self.next_seq_num = buffer_begin + len(data_buffer)*self.MSS
                 else:
                     mydata, addr = self.receive_segment()
                     self.winSize = mydata['winsize']
@@ -130,29 +133,45 @@ class Client:
                             else:
                                 self.congestion_winSize = self.congestion_winSize + 1
                             self.send_base = mydata['ack']
-                            if self.send_base < self.next_seq_num:
+                            if self.send_base < buffer_begin+len(data_buffer)*self.MSS:
                                 self.file_socket.settimeout(2)
                             else:
                                 buffer_begin += len(data_buffer) * self.MSS
+                                self.next_seq_num = buffer_begin
                                 data_buffer, data_ack = self.get_buffer(file, self.winSize)
                                 can_send = True
                             if mydata['ack'] >= self.file_length:
                                 print('file transmission over')
                                 break
+                        else:
+                            duplication += 1
+                            if duplication >= 3:
+                                duplication = 0
+                                print("retransmission now")
+                                self.file_socket.settimeout(0.001)
             except socket.timeout as reason:
                 #拥塞控制
                 self.threshold = self.threshold + 0.5 // 2
                 self.congestion_winSize = 1
                 print(reason)
+                self.file_socket.settimeout(2)
+                print(self.send_base, self.next_seq_num, buffer_begin+len(data_buffer)*self.MSS)
                 if self.send_base >= self.file_length:
                     print(self.send_base, self.file_length)
                     break
                 elif self.send_base < self.next_seq_num:
-                    temp = self.next_seq_num
+                    # temp = self.next_seq_num
+                    # self.next_seq_num = self.send_base
+                    # self.reliable_send_segment(SYN, ACK, Func,
+                    #                            data_buffer[(self.send_base - buffer_begin) // self.MSS])
+                    # self.next_seq_num = temp
                     self.next_seq_num = self.send_base
-                    self.reliable_send_segment(SYN, ACK, Func,
-                                               data_buffer[(self.send_base - buffer_begin) // self.MSS])
-                    self.next_seq_num = temp
+                    can_send = True
+            except Exception as reason:
+                print(reason)
+                print("file transfer over")
+                break
+
 
     def get_last_ack(self, data):
         for i in range(len(data)):
@@ -206,7 +225,8 @@ class Client:
                                     if next_ack == -1:
                                         self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                         self.write_buffer_to_file(file, data_buffer)
-                                        self.winSize = 5
+                                        self.winSize = self.initWinSize
+                                        self.winSize = 50
                                         data_buffer = [b''] * self.winSize
                                         buffer_begin = self.client_ACK
                                     else:
