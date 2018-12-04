@@ -13,28 +13,29 @@ import time
 class Client:
     def __init__(self, _file_name, _server_name, port):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.file_socket.bind(("127.0.0.1", 9999))
+        self.client_port = random.randint(10000, 12000)
+        self.file_socket.bind(("127.0.0.1", self.client_port))
         self.next_seq_num = random.randint(0, 100)
         self.client_ACK = 0
         self.file_name = _file_name
         self.server_name = _server_name
         self.server_port = port
-        self.client_port = 9999
         self.MSS = 10
         self.send_base = self.next_seq_num
-        self.winSize = 5
+        self.initWinSize = 10
+        self.winSize = self.initWinSize
         self.file_length = 0
 
     def __del__(self):
         self.file_socket.close()
 
     def send_segment(self, SYN, ACK, Func, data=b""):
-        # * is the character used to split
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
         print("发送:", data)
         address = (self.server_name, self.server_port)
-        self.file_socket.sendto(seg, address)
+        if random.randint(0, 10) > 2:
+            self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -60,6 +61,7 @@ class Client:
         except TypeError as error:
             print(error)
             data['valid'] = False
+        print("接收:", data)
         return data, address
 
     def get_buffer(self, file, size):
@@ -83,42 +85,60 @@ class Client:
         buffer_begin = 0
         buffer_begin += len(data_buffer) * self.MSS
         data_buffer, data_ack = self.get_buffer(file, self.winSize)
+        duplication = 0
         can_send = True
         while True:
             try:
                 if can_send:
-                    while self.next_seq_num < buffer_begin + min(self.winSize, len(data_buffer)) * self.MSS:
+                    while self.next_seq_num < self.send_base + min(self.winSize, len(data_buffer)) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
                                                    data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
                     can_send = False
+                    self.next_seq_num = buffer_begin + len(data_buffer)*self.MSS
                 else:
                     mydata, addr = self.receive_segment()
                     self.winSize = mydata['winsize']
-                    print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
+                            duplication = 0
                             self.send_base = mydata['ack']
-                            if self.send_base < self.next_seq_num:
+                            if self.send_base < buffer_begin+len(data_buffer)*self.MSS:
                                 self.file_socket.settimeout(2)
                             else:
                                 buffer_begin += len(data_buffer) * self.MSS
+                                self.next_seq_num = buffer_begin
                                 data_buffer, data_ack = self.get_buffer(file, self.winSize)
                                 can_send = True
                             if mydata['ack'] >= self.file_length:
                                 print('file transmission over')
                                 break
+                        else:
+                            duplication += 1
+                            if duplication >= 3:
+                                duplication = 0
+                                print("retransmission now")
+                                self.file_socket.settimeout(0.001)
             except socket.timeout as reason:
                 print(reason)
+                self.file_socket.settimeout(2)
+                print(self.send_base, self.next_seq_num, buffer_begin+len(data_buffer)*self.MSS)
                 if self.send_base >= self.file_length:
                     print(self.send_base, self.file_length)
                     break
                 elif self.send_base < self.next_seq_num:
-                    temp = self.next_seq_num
+                    # temp = self.next_seq_num
+                    # self.next_seq_num = self.send_base
+                    # self.reliable_send_segment(SYN, ACK, Func,
+                    #                            data_buffer[(self.send_base - buffer_begin) // self.MSS])
+                    # self.next_seq_num = temp
                     self.next_seq_num = self.send_base
-                    self.reliable_send_segment(SYN, ACK, Func,
-                                               data_buffer[(self.send_base - buffer_begin) // self.MSS])
-                    self.next_seq_num = temp
+                    can_send = True
+            except Exception as reason:
+                print(reason)
+                print("file transfer over")
+                break
+
 
     def get_last_ack(self, data):
         for i in range(len(data)):
@@ -171,7 +191,7 @@ class Client:
                                     if next_ack == -1:
                                         self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                         self.write_buffer_to_file(file, data_buffer)
-                                        self.winSize = 5
+                                        self.winSize = self.initWinSize
                                         data_buffer = [b''] * self.winSize
                                         buffer_begin = self.client_ACK
                                     else:
@@ -260,9 +280,9 @@ def decode_segment(segment):
 if __name__ == "__main__":
     default_port = 5555
     server_name = "127.0.0.1"
-    file_name = "././test.txt"
+    file_name = "./test.txt"
     client = Client(file_name, server_name, default_port)
-    func = "lget"
+    func = "lsend"
     if func == "lsend":
         with open(file_name, "rb") as file:
             # TCP construction

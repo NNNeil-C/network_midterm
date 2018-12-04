@@ -4,6 +4,7 @@ import time
 import logging
 import os
 import threading
+import utils
 
 
 class Interface:
@@ -15,7 +16,8 @@ class Interface:
         (self.server_name, self.server_port) = address
         self.MSS = 10
         self.send_base = self.next_seq_num = random.randint(0, 100)
-        self.winSize = 5
+        self.initWinSize = 10
+        self.winSize = self.initWinSize
         self.file_length = 0
         self.lockForBase = threading.Lock()
         if self.hand_shake(func):
@@ -30,12 +32,12 @@ class Interface:
         self.file_socket.close()
 
     def send_segment(self, SYN, ACK, Func, data=b""):
-        # * is the character used to split
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
         print("发送:", data)
         address = (self.server_name, self.server_port)
-        self.file_socket.sendto(seg, address)
+        if random.randint(0, 10) > 2:
+            self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -61,6 +63,7 @@ class Interface:
         except TypeError as error:
             print(error)
             data['valid'] = False
+        print("接收: ", data)
         return data, address
 
     def send_file(self, file):
@@ -95,7 +98,6 @@ class Interface:
                 else:
                     mydata, addr = self.receive_segment()
                     self.winSize = mydata['winsize']
-                    print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
                             self.send_base = mydata['ack']
@@ -167,18 +169,22 @@ class Interface:
                 else:
                     mydata, addr = self.receive_segment()
                     can_send = True
-                    if mydata['valid']:
+                    if mydata['valid'] and not mydata['ACK'] == 1:
+                        print(mydata['seq'], buffer_begin, len(data_buffer))
                         if mydata['seq'] < buffer_begin or mydata['seq'] > buffer_begin + len(data_buffer) * self.MSS:
+                            print("continue")
                             continue
                         if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
                             data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
                             self.winSize = self.get_free_buff(data_buffer)
+                            print(rtACK, mydata['seq'], mydata['seq'] + len(mydata['data']))
                             if rtACK >= mydata['seq'] and rtACK < mydata['seq'] + len(mydata['data']):
                                 next_ack = self.get_last_ack(data_buffer)
+                                print('next ack', next_ack)
                                 if next_ack == -1:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
-                                    self.winSize = 5
+                                    self.winSize = self.initWinSize
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
                                 else:
@@ -188,6 +194,7 @@ class Interface:
                                     self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
                                     if self.client_ACK >= self.file_length:
                                         can_send = True
+                                    print(self.client_ACK, self.file_length)
             except socket.timeout as reason:
                 print(reason)
                 can_send = True
@@ -195,6 +202,7 @@ class Interface:
                     self.write_buffer_to_file(file, data_buffer)
                     print("RECEIVE FILE OVER")
                     break
+
 
     def hand_shake(self, func):
         SYN = 1
@@ -221,18 +229,6 @@ class Server:
     def __init__(self):
         self.file_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_socket.bind(('127.0.0.1', 5555))
-        self.addr_info = {}
-
-    def newInterface(self, addr, ACK, SEQ):
-        #  New a buffer for the address
-        clientInterface = Interface(self.fileSocket, addr, ACK, SEQ)
-        self.addr_info[addr] = clientInterface
-
-    def deleteInterface(self, addr):
-        self.addr_info.pop(addr)
-
-    def getInterface(self, addr):
-        return self.addr_info[addr]
 
     def receive_segment(self):
         seg, address = self.file_socket.recvfrom(4096)
@@ -286,18 +282,22 @@ def decode_segment(segment):
 
 def handler(addr, seq, func):
     Interface(addr, seq, func)
+    del addrInfo[addr]
 
+
+addrInfo = {}
 
 if __name__ == "__main__":
     server = Server()
     addr = ()
     seq = 0
     func = 0
-
     while True:
         data, addr = server.receive_segment()
-        if data['SYN'] == 1:
+        if data['SYN'] == 1 and addr not in addrInfo:
+            addrInfo[addr] = 1
             seq = data['seq']
             func = data['FUNC']
             t = threading.Thread(target=handler, args=(addr, seq, func))
             t.start()
+
