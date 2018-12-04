@@ -4,7 +4,7 @@ import time
 import logging
 import os
 import threading
-import numpy
+import math
 
 class Interface:
     def __init__(self, address, seq, func):
@@ -15,7 +15,7 @@ class Interface:
         (self.server_name, self.server_port) = address
         self.MSS = 10
         self.send_base = self.next_seq_num = random.randint(0, 100)
-        self.winSize = 50
+        self.winSize = 5
         self.congestion_winSize = 50
         self.threshold = 30
         self.file_length = 0
@@ -37,7 +37,8 @@ class Interface:
         data = decode_segment(seg)
         print("发送:", data)
         address = (self.server_name, self.server_port)
-        self.file_socket.sendto(seg, address)
+        if random.randint(0, 10) > 2:
+            self.file_socket.sendto(seg, address)
 
     def encode_data(self, syn, ack, func, data):
         port = self.client_port.to_bytes(2, 'little')
@@ -63,6 +64,7 @@ class Interface:
         except TypeError as error:
             print(error)
             data['valid'] = False
+        print("接收: ", data)
         return data, address
 
     def send_file(self, file):
@@ -119,7 +121,7 @@ class Interface:
                 
             except socket.timeout as reason:
                 #拥塞控制
-                self.threshold = ceil(self.threshold / 2)
+                self.threshold = math.ceil(self.threshold / 2)
                 self.congestion_winSize = 1
                 print(reason)
                 if self.send_base >= self.file_length:
@@ -190,7 +192,7 @@ class Interface:
                                 if next_ack == -1:
                                     self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
                                     self.write_buffer_to_file(file, data_buffer)
-                                    self.winSize = 50
+                                    self.winSize = 5
                                     data_buffer = [b'']*self.winSize
                                     buffer_begin = self.client_ACK
                                 else:
@@ -223,7 +225,7 @@ class Interface:
                 if data['valid']:
                     if data['ACK'] == 1:
                         f = data['data'].split(b" ")
-                        self.file_name = './data' + f[0].decode('utf-8')
+                        self.file_name = './data/' + f[0].decode('utf-8')
                         self.file_length = int(f[1])
                         break
             except socket.timeout as reason:
