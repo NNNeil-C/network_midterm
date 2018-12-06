@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 import socket
 import os
-import sys
-import logging
-import threading
-import random
 import math
-import struct
-import time
+import random
+import sys
+
 
 
 class Client:
@@ -20,9 +17,10 @@ class Client:
         self.file_name = _file_name
         self.server_name = _server_name
         self.server_port = port
-        self.MSS = 10
+        self.MSS = 1024
         self.send_base = self.next_seq_num
-        self.winSize = 5
+        self.initWinSize = 50
+        self.winSize = self.initWinSize
         self.congestion_winSize = 50
         self.file_length = 0
         self.threshold = 30
@@ -33,13 +31,11 @@ class Client:
     def send_segment(self, SYN, ACK, Func, data=b""):
         seg = self.encode_data(SYN, ACK, Func, data)
         data = decode_segment(seg)
-        # print("发送:", data)
         
         #进度条
         global func
         global start
         if (start == True and func == 'lget'):
-            #print(self.file_length)
             sys.stdout.write('\r')
             done = (data['ack'] * 100 // self.file_length)
             done = min(100, done)
@@ -74,7 +70,6 @@ class Client:
             global func
             global start
             if (start == True and func == 'lsend'):
-                #print(self.file_length)
                 sys.stdout.write('\r')
                 done = (data['ack'] * 100 // self.file_length)
                 done = min(done, 100)
@@ -84,92 +79,92 @@ class Client:
         except TypeError as error:
             print(error)
             data['valid'] = False
-        # print("接收:", data)
         return data, address
 
-    def get_buffer(self, file, size):
-        buf = []
-        ack = []
+    def get_buffer(self, file, size,  buf):
+        buf = buf[size:]
         for i in range(size):
             temp = file.read(self.MSS)
             if temp == b'':
                 break
             buf.append(temp)
-            ack.append(False)
-        return buf, ack
+        return buf, size
 
     def send_file(self, file):
         self.next_seq_num = self.send_base = 0
-        print(self.file_length)
+        print("Beging to send file: %s, size: %d" % (self.file_name, self.file_length))
         SYN = 0
         ACK = 0
         Func = 0
-        data_buffer = []
+
         buffer_begin = 0
-        buffer_begin += len(data_buffer) * self.MSS
-        data_buffer, data_ack = self.get_buffer(file, self.winSize)
-        duplication = 0
+        data_buffer = []
+        data_buffer, _ = self.get_buffer(file, self.initWinSize, data_buffer)
         can_send = True
+        duplication = 0
         while True:
             try:
                 if can_send:
-
                     # and min congestion window
-                    while self.next_seq_num < buffer_begin + min(min(self.winSize, len(data_buffer)), self.congestion_winSize) * self.MSS:
+                    while self.next_seq_num < self.send_base + min(self.winSize, self.congestion_winSize) * self.MSS \
+                            and self.next_seq_num < buffer_begin + len(data_buffer) * self.MSS:
                         self.reliable_send_segment(SYN, ACK, Func,
                                                    data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
                         self.next_seq_num = self.next_seq_num + self.MSS
                     can_send = False
-                    self.next_seq_num = buffer_begin + len(data_buffer)*self.MSS
                 else:
                     mydata, addr = self.receive_segment()
+                    # flow control
                     self.winSize = mydata['winsize']
-                    #print("接收:", mydata)
                     if mydata['valid']:
                         if mydata['ack'] > self.send_base:
-                            #拥塞控制
-                            if (self.congestion_winSize < self.threshold):
-                                self.congestion_winSize = self.congestion_winSize * 2
+                            self.file_socket.settimeout(0.5)
+                            # 拥塞控制
+                            if self.congestion_winSize < self.threshold:
+                                self.congestion_winSize = \
+                                    self.congestion_winSize * math.pow(2, (mydata['ack']-self.send_base) // self.MSS)
+                                if (self.congestion_winSize > self.threshold):
+                                    self.congestion_winSize = self.threshold
                             else:
-                                self.congestion_winSize = self.congestion_winSize + 1
+                                self.congestion_winSize = \
+                                    self.congestion_winSize + (mydata['ack']-self.send_base) // self.MSS
+                            if self.send_base > self.next_seq_num:
+                                self.next_seq_num = self.send_base
                             self.send_base = mydata['ack']
-                            if self.send_base < buffer_begin+len(data_buffer)*self.MSS:
-                                self.file_socket.settimeout(2)
-                            else:
-                                buffer_begin += len(data_buffer) * self.MSS
-                                self.next_seq_num = buffer_begin
-                                data_buffer, data_ack = self.get_buffer(file, self.winSize)
-                                can_send = True
+                            data_buffer, had_write = \
+                                self.get_buffer(file, (self.send_base - buffer_begin) // self.MSS, data_buffer)
+                            buffer_begin = buffer_begin + had_write * self.MSS
+                            self.next_seq_num = self.send_base
+                            can_send = True
                             if mydata['ack'] >= self.file_length:
-                                print('file transmission over')
+                                print('\nSend file over')
                                 break
                         else:
                             duplication += 1
                             if duplication >= 3:
                                 duplication = 0
-                                # print("retransmission now")
-                                self.file_socket.settimeout(0.001)
+                                self.congestion_winSize = (self.congestion_winSize+1) // 2
+                                self.next_seq_num = self.send_base
+                                self.reliable_send_segment(SYN, ACK, Func,
+                                                           data_buffer[(self.next_seq_num - buffer_begin) // self.MSS])
+                                can_send = False
+                                continue
             except socket.timeout as reason:
-                #拥塞控制
-                self.threshold = self.threshold + 0.5 // 2
+                # 拥塞控制
+                self.threshold = (self.threshold + 1) // 2
                 self.congestion_winSize = 1
-                print(reason)
-                self.file_socket.settimeout(2)
-                # print(self.send_base, self.next_seq_num, buffer_begin+len(data_buffer)*self.MSS)
                 if self.send_base >= self.file_length:
-                    print(self.send_base, self.file_length)
+                    print("Send file over")
                     break
-                elif self.send_base < self.next_seq_num:
-                    temp = self.next_seq_num
+                elif self.send_base <= self.next_seq_num:
                     self.next_seq_num = self.send_base
-                    self.reliable_send_segment(SYN, ACK, Func,
-                                               data_buffer[(self.send_base - buffer_begin) // self.MSS])
-                    self.next_seq_num = temp
-                    # self.next_seq_num = self.send_base
-                    # can_send = True
+                    can_send = True
             except Exception as reason:
-                print(reason)
-                print("file transfer over")
+                sys.stdout.write('\r')
+                done = 100
+                sys.stdout.write("[%s>%s] %s" % ('-' * done, ' ' * (100 - done), str(done) + '%'))
+                sys.stdout.flush()
+                print("\nSend file over")
                 break
 
 
@@ -177,7 +172,7 @@ class Client:
         for i in range(len(data)):
             if data[i] == b'':
                 return i
-        return -1
+        return len(data)
 
     def get_free_buff(self, data):
         count = 0
@@ -187,64 +182,89 @@ class Client:
         return count
 
     def write_buffer_to_file(self, file, data):
-        # print(data)
-        for temp in data:
-            file.write(temp)
+        i = 0
+        for i in range(len(data)):
+            if data[i] == b'':
+                break
+            file.write(data[i])
+        if i == len(data)-1 and data[i] != b'':
+            i += 1
+        buffer = data[i:] + [b''] * i
+        return buffer
+
+    def slide_windows(self, file, data_buffer, buffer_begin, ):
+        self.file_socket.settimeout(2)
+        next_ack = self.get_last_ack(data_buffer)
+        data_buffer = self.write_buffer_to_file(file, data_buffer)
+        self.client_ACK = buffer_begin + next_ack * self.MSS
+        buffer_begin = self.client_ACK
+        return data_buffer, buffer_begin, self.get_free_buff(data_buffer)
 
     def receive_file(self, file):
         SYN = 0
         ACK = 0
         Func = 1
-        print('begin to receive file')
         data = b"***"
         data_buffer = [b''] * self.winSize
         buffer_begin = 0
-        print('begin to receive file:', self.file_length)
-        self.send_base = self.next_seq_num = self.client_ACK = rtACK = 0
+        print('Begin to receive file:', self.file_length)
+        self.send_base = self.next_seq_num = self.client_ACK = 0
         can_send = True
         while True:
             try:
                 if can_send:
+                    # send ack and start timeout
                     self.reliable_send_segment(SYN, ACK, Func, data)
                     can_send = False
                 else:
                     mydata, addr = self.receive_segment()
-                    
                     can_send = True
-                    if mydata['valid']:
+                    if mydata['valid'] and mydata['FUNC'] == 0:
+                        # func == 0 mean both server an client get the file information
                         if mydata['FUNC'] == 0:
                             data = b''
-                            if mydata['seq'] < buffer_begin or mydata['seq'] > buffer_begin + len(
-                                    data_buffer) * self.MSS:
+                            # out of buffer
+                            if mydata['seq'] < buffer_begin or buffer_begin + len(
+                                    data_buffer) * self.MSS <= mydata['seq']:
+                                can_send = False
                                 continue
+                            # data no in buffer
                             if data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] == b'':
                                 data_buffer[(mydata['seq'] - buffer_begin) // self.MSS] = mydata['data']
                                 self.winSize = self.get_free_buff(data_buffer)
-                                if rtACK >= mydata['seq'] and rtACK < mydata['seq'] + len(mydata['data']):
+                                if self.client_ACK == mydata['seq']:
                                     next_ack = self.get_last_ack(data_buffer)
-                                    if next_ack == -1:
-                                        self.client_ACK = rtACK = buffer_begin + len(data_buffer) * self.MSS
-                                        self.write_buffer_to_file(file, data_buffer)
-                                        self.winSize = 50
-                                        data_buffer = [b''] * self.winSize
-                                        buffer_begin = self.client_ACK
+                                    # buffer full of data
+                                    if next_ack == len(data_buffer):
+                                        data_buffer, buffer_begin, self.winSize = \
+                                            self.slide_windows(file, data_buffer, buffer_begin)
                                     else:
-                                        if buffer_begin + next_ack * self.MSS - rtACK <= self.MSS:
-                                            socket.timeout(1)
+                                        if buffer_begin + next_ack * self.MSS - self.client_ACK == self.MSS:
+                                            self.file_socket.settimeout(0.5)
                                             can_send = False
-                                        self.client_ACK = rtACK = buffer_begin + next_ack * self.MSS
+                                            self.client_ACK = buffer_begin + next_ack * self.MSS
+                                        else:
+                                            data_buffer, buffer_begin, self.winSize = \
+                                                self.slide_windows(file, data_buffer, buffer_begin)
                                         if self.client_ACK >= self.file_length:
+                                            self.write_buffer_to_file(file, data_buffer)
+                                            data_buffer = []
                                             can_send = True
-                #加入拥塞控制
-                #self.congestion_winSize = self.congestion_winSize * 2
+                            else:
+                                data_buffer, buffer_begin, self.winSize = \
+                                    self.slide_windows(file, data_buffer, buffer_begin)
+                                continue
             except socket.timeout as reason:
-                self.congestion_winSize = 5
-                # print(reason)
                 can_send = True
                 if self.client_ACK >= self.file_length:
                     self.write_buffer_to_file(file, data_buffer)
-                    print("RECEIVE FILE OVER")
+                    print("\nRECEIVE FILE OVER")
                     break
+                data_buffer, buffer_begin, self.winSize = \
+                    self.slide_windows(file, data_buffer, buffer_begin)
+            except Exception as reason:
+                print("\nRECEIVE FILE OVER")
+                break
 
     def hand_shake(self, func):
         if func == 0:
@@ -268,7 +288,7 @@ class Client:
                     elif not data['SYN']:
                         if data['FUNC'] == 1:
                             self.file_length = int(data['data'])
-                            print('HAND SHAKE OVER:', self.file_length)
+                        print('HAND SHAKE OVER:', self.file_length)
                         break
             except socket.timeout as reason:
                 print(reason)
